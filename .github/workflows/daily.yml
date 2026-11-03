@@ -1,0 +1,27 @@
+name: Daily news digest
+
+on:
+  schedule:
+    # 12:00 and 13:00 UTC = 8am Toronto in summer (EDT) and winter (EST).
+    # The script only sends when it is actually 8am in Toronto.
+    - cron: "0 12 * * *"
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python news_bot.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Manual runs from the Actions tab send immediately for testing.
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
