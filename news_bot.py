@@ -145,30 +145,68 @@ def summarize(items, movers: str) -> str:
         "The articles below are everything Al Jazeera and Yahoo Finance published in the last 24 hours. "
         "Pick the most important content and summarize it, giving priority to these topics: the United "
         "States (including Donald Trump), wars and conflicts around the world, and stock-market news. "
-        "Use ONLY the material below; do not add outside facts. Attribute claims made by one side "
-        "(e.g. 'Tehran says...'). Plain text, no markdown, about 3,500 characters maximum.\n\n"
-        "Structure:\n"
-        "1) TOP HEADLINES: the 3-5 most important stories of the last 24 hours.\n"
-        "2) UNITED STATES: the most important news about the US, including Donald Trump and the "
-        "administration (politics, policy, economy, US-Iran relations), 1-2 sentences each, with the "
-        "source link.\n"
-        "   WORLD CONFLICTS: the state of wars and armed conflicts around the world (Iran/Middle East, "
-        "Ukraine-Russia, Gaza, and any others in the news), 1-2 sentences each, with the source link.\n"
-        "3) MARKETS: main market and economy news, then TOP MOVERS: for the biggest gainers and "
-        "losers give ticker, % move, and the likely reason based ONLY on the headlines supplied for "
-        "that ticker. If they give no clear reason, say 'no clear catalyst in the news provided'.\n"
-        "4) ALSO WORTH KNOWING: up to 3 other major stories outside these topics, one line each.\n\n"
+        "Use ONLY the material below; do not add outside facts. Attribute one-sided claims "
+        "(e.g. 'Tehran says...'). Plain text, no markdown, no URLs; cite the source name in "
+        "parentheses, e.g. (Al Jazeera).\n\n"
+        "HARD LIMIT: the whole briefing must be under 3,200 characters, so be ruthless. Every story "
+        "appears ONCE only; never repeat a story across sections. One short sentence per bullet.\n\n"
+        "Use exactly this structure:\n"
+        "TOP HEADLINES: the 4 biggest stories of the last 24 hours, one line each.\n"
+        "UNITED STATES: 3-4 bullets on important US news, including Donald Trump and the "
+        "administration, excluding stories already used above.\n"
+        "WORLD CONFLICTS: 4-5 bullets on wars and conflicts worldwide (Middle East/Iran, "
+        "Ukraine-Russia, Gaza, others), excluding stories already used above.\n"
+        "MARKETS: one line on the overall market/economy picture if the articles support it, then "
+        "top 3 gainers and top 3 losers, each as: TICKER +x.x%: reason in under 12 words, based ONLY "
+        "on the headlines supplied for that ticker (write 'no clear catalyst' if none).\n\n"
         "=== ARTICLES ===\n" + "\n\n---\n\n".join(blocks)
         + "\n\n=== TOP MOVERS DATA ===\n" + (movers or "Not available today.")
     )
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-        headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=120,
-    )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    return call_gemini(prompt)
+
+
+def call_gemini(prompt: str) -> str:
+    """Retry with backoff on overload (429/5xx), then fall back to a lighter model."""
+    models = [GEMINI_MODEL, "gemini-2.5-flash-lite"]
+    last_err = None
+    for model in models:
+        for attempt in range(4):
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=120,
+                )
+                if r.status_code in (429, 500, 502, 503, 504):
+                    raise requests.HTTPError(f"{r.status_code} from {model}")
+                r.raise_for_status()
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except (requests.RequestException, KeyError, IndexError) as ex:
+                last_err = ex
+                print(f"gemini {model} attempt {attempt + 1} failed: {ex}", file=sys.stderr)
+                time.sleep(10 * (attempt + 1))
+    raise RuntimeError(f"Gemini unavailable: {last_err}")
+
+
+TG_LIMIT = 4000
+
+
+def fit_one_message(text: str) -> str:
+    """Make sure the briefing fits in a single Telegram message."""
+    if len(text) <= TG_LIMIT:
+        return text
+    try:
+        short = call_gemini(
+            "Shorten this briefing to under 3,300 characters. Keep the same section structure and "
+            "the most important facts, drop minor items, no markdown:\n\n" + text)
+        if len(short) <= TG_LIMIT:
+            return short
+        text = short
+    except Exception as ex:
+        print(f"shorten failed: {ex}", file=sys.stderr)
+    cut = text[:TG_LIMIT].rsplit("\n", 1)[0]  # cut at a line boundary
+    return cut
 
 
 def send_telegram(text: str):
@@ -194,7 +232,15 @@ def main():
     if not items and not movers:
         send_telegram("No new articles matching your topics in the last 24 hours.")
         return
-    send_telegram(f"Morning briefing - {datetime.now(LOCAL_TZ):%b %d, %Y}\n\n{summarize(items, movers)}")
+    today = f"{datetime.now(LOCAL_TZ):%b %d, %Y}"
+    try:
+        send_telegram(fit_one_message(f"Morning briefing - {today}\n\n{summarize(items, movers)}"))
+    except RuntimeError as ex:
+        # AI unavailable: still deliver the raw headlines so the day is not lost.
+        print(ex, file=sys.stderr)
+        lines = [f"- ({i['source']}) {i['title']}\n  {i['link']}" for i in items[:20]]
+        send_telegram(f"Morning briefing - {today}\n\nAI summary unavailable today; "
+                      "here are the latest headlines instead:\n\n" + "\n".join(lines))
 
 
 if __name__ == "__main__":
