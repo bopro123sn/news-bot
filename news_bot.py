@@ -22,14 +22,17 @@ MARKET_KEYWORDS = [
     "dollar", "rally", "selloff", "surge", "plunge", "jump", "tumble",
 ]
 # (feed url, keywords an item must match)
+# Both feeds are read in full for the last 24h; the keywords only mark priority items.
 FEEDS = [
-    ("https://www.aljazeera.com/xml/rss/all.xml", GEO_KEYWORDS),
-    ("https://finance.yahoo.com/news/rssindex", GEO_KEYWORDS + MARKET_KEYWORDS),
+    ("https://www.aljazeera.com/xml/rss/all.xml", None),
+    ("https://finance.yahoo.com/news/rssindex", None),
 ]
+PRIORITY_KEYWORDS = GEO_KEYWORDS + MARKET_KEYWORDS
+MAX_FULL_BODIES = 10
 LOCAL_TZ = ZoneInfo("America/Toronto")
 SEND_HOUR = 8
 LOOKBACK_HOURS = 24
-MAX_ITEMS = 18
+MAX_ITEMS = 40
 MAX_CHARS_PER_ITEM = 3000
 MOVERS_PER_SIDE = 5
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -61,17 +64,21 @@ def fetch_items():
                     continue
             title = e.get("title", "")
             summary = re.sub(r"<[^>]+>", "", e.get("summary", ""))
-            if not matches(f"{title} {summary}", keywords):
+            if keywords and not matches(f"{title} {summary}", keywords):
                 continue
             seen.add(link)
             source = "Al Jazeera" if "aljazeera" in url else "Yahoo Finance"
-            items.append({"title": title, "link": link, "summary": summary, "source": source})
-    # Keep a balanced mix from both sources.
-    items.sort(key=lambda i: i["source"])
+            priority = matches(f"{title} {summary}", PRIORITY_KEYWORDS)
+            items.append({"title": title, "link": link, "summary": summary,
+                          "source": source, "priority": priority})
+    # Balanced mix from both sources, priority-topic items first within each.
     half = MAX_ITEMS // 2
-    aj = [i for i in items if i["source"] == "Al Jazeera"][:half]
-    yf_items = [i for i in items if i["source"] != "Al Jazeera"][:half]
-    return aj + yf_items
+    out = []
+    for src in ("Al Jazeera", "Yahoo Finance"):
+        mine = [i for i in items if i["source"] == src]
+        mine.sort(key=lambda i: not i["priority"])  # stable: keeps feed order
+        out += mine[:half]
+    return out
 
 
 def fetch_body(item) -> str:
@@ -126,21 +133,31 @@ def fetch_movers() -> str:
 
 
 def summarize(items, movers: str) -> str:
-    blocks = [
-        f"[{i}] ({it['source']}) {it['title']}\n{it['link']}\n{fetch_body(it)}"
-        for i, it in enumerate(items, 1)
-    ]
+    blocks, full = [], 0
+    for i, it in enumerate(items, 1):
+        if it["priority"] and full < MAX_FULL_BODIES:
+            body, full = fetch_body(it), full + 1
+        else:
+            body = it["summary"][:600]
+        blocks.append(f"[{i}] ({it['source']}) {it['title']}\n{it['link']}\n{body}")
     prompt = (
         "You are a news editor writing a morning briefing in clear, concise English for one reader. "
+        "The articles below are everything Al Jazeera and Yahoo Finance published in the last 24 hours. "
+        "Pick the most important content and summarize it, giving priority to these topics: the United "
+        "States (including Donald Trump), wars and conflicts around the world, and stock-market news. "
         "Use ONLY the material below; do not add outside facts. Attribute claims made by one side "
         "(e.g. 'Tehran says...'). Plain text, no markdown, about 3,500 characters maximum.\n\n"
         "Structure:\n"
-        "1) TOP HEADLINES: 3-5 bullets of the most important items.\n"
-        "2) US / TRUMP / IRAN / WAR: key developments, 1-2 sentences each, with the source link.\n"
-        "3) MARKETS - TOP MOVERS: for the biggest gainers and losers, give ticker, % move, and the "
-        "likely reason based ONLY on the headlines supplied for that ticker. If the headlines give "
-        "no clear reason, say 'no clear catalyst in the news provided'. Do not speculate.\n"
-        "4) Brief market/economy news from the articles if relevant.\n\n"
+        "1) TOP HEADLINES: the 3-5 most important stories of the last 24 hours.\n"
+        "2) UNITED STATES: the most important news about the US, including Donald Trump and the "
+        "administration (politics, policy, economy, US-Iran relations), 1-2 sentences each, with the "
+        "source link.\n"
+        "   WORLD CONFLICTS: the state of wars and armed conflicts around the world (Iran/Middle East, "
+        "Ukraine-Russia, Gaza, and any others in the news), 1-2 sentences each, with the source link.\n"
+        "3) MARKETS: main market and economy news, then TOP MOVERS: for the biggest gainers and "
+        "losers give ticker, % move, and the likely reason based ONLY on the headlines supplied for "
+        "that ticker. If they give no clear reason, say 'no clear catalyst in the news provided'.\n"
+        "4) ALSO WORTH KNOWING: up to 3 other major stories outside these topics, one line each.\n\n"
         "=== ARTICLES ===\n" + "\n\n---\n\n".join(blocks)
         + "\n\n=== TOP MOVERS DATA ===\n" + (movers or "Not available today.")
     )
