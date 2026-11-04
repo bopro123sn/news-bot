@@ -1,9 +1,7 @@
 name: Daily news digest
  
+# Triggered externally (cron-job.org calls the GitHub API at 8am Toronto) or manually.
 on:
-  schedule:
-    # TEST: 14:36 UTC = 9:36am Toronto (EST). Remove after testing.
-    - cron: "36 14 * * *"
   workflow_dispatch:
  
 jobs:
@@ -21,5 +19,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # TEST: always send, skipping the 8am check.
+          # Every dispatch (external or manual) sends immediately.
           FORCE: "1"
