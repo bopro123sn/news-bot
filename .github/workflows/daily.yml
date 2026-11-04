@@ -1,13 +1,11 @@
 name: Daily news digest
-
+ 
 on:
   schedule:
-    # 12:00 and 13:00 UTC = 8am Toronto in summer (EDT) and winter (EST).
-    # The script only sends when it is actually 8am in Toronto.
-    - cron: "0 12 * * *"
-    - cron: "0 13 * * *"
+    # TEST: 14:36 UTC = 9:36am Toronto (EST). Remove after testing.
+    - cron: "36 14 * * *"
   workflow_dispatch:
-
+ 
 jobs:
   digest:
     runs-on: ubuntu-latest
@@ -23,5 +21,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Manual runs from the Actions tab send immediately for testing.
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          # TEST: always send, skipping the 8am check.
+          FORCE: "1"
